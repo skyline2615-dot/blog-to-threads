@@ -1,0 +1,40 @@
+name: Auto Publish Blog to Threads
+
+on:
+  schedule:
+    # UTC 기준. 한국시간(KST) = UTC+9
+    # 23:00 UTC = 아침 8시 KST, 09:00 UTC = 저녁 6시 KST
+    - cron: "0 23 * * *"
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}   # GitHub Actions 탭에서 수동 실행 버튼도 사용 가능
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 스크립트 실행
+        env:
+          NAVER_BLOG_ID: ${{ secrets.NAVER_BLOG_ID }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python publish_to_threads.py
+
+      - name: 상태 파일 커밋 (중복 게시 방지용)
+        run: |
+          git config user.name "auto-publish-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/last_published.json
+          git diff --cached --quiet || git commit -m "chore: update published state"
+          git push
