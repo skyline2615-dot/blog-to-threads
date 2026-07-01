@@ -24,6 +24,7 @@ import json
 import time
 import re
 import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from html import unescape
 
@@ -44,8 +45,12 @@ def http_request(url, method="GET", data=None, headers=None, timeout=30):
         body = json.dumps(data).encode("utf-8")
         headers.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"[{method} {url}] HTTP {e.code}: {err_body}") from e
 
 
 def load_state():
@@ -184,6 +189,19 @@ def main():
     seen = set(state.get("seen_links", []))
 
     items = fetch_naver_rss(blog_id)
+
+    if not state.get("bootstrapped"):
+        # 첫 실행: 기존에 이미 올라와 있던 글들은 게시 대상에서 제외하고
+        # "여기까지는 이미 확인함" 으로만 표시한다. 이렇게 안 하면 블로그에
+        # 쌓여 있던 과거 글 전부가 한꺼번에 Threads에 올라가게 된다.
+        seen.update(it["link"] for it in items)
+        state["seen_links"] = list(seen)
+        state["bootstrapped"] = True
+        save_state(state)
+        log(f"초기 설정 완료: 기존 글 {len(items)}건은 게시 대상에서 제외. "
+            f"다음 실행부터 새로 올라오는 글만 자동 게시됩니다.")
+        return
+
     new_items = [it for it in items if it["link"] not in seen]
 
     if not new_items:
