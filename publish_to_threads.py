@@ -73,6 +73,21 @@ def strip_html(raw_html):
     return text
 
 
+IMG_SRC_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def extract_first_image(raw_html):
+    if not raw_html:
+        return None
+    match = IMG_SRC_RE.search(raw_html)
+    if not match:
+        return None
+    src = unescape(match.group(1))
+    if src.startswith("//"):
+        src = "https:" + src
+    return src
+
+
 def fetch_naver_rss(blog_id):
     url = f"https://rss.blog.naver.com/{blog_id}.xml"
     log(f"RSS 가져오는 중: {url}")
@@ -84,13 +99,16 @@ def fetch_naver_rss(blog_id):
     for item in root.findall(".//item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
-        description = strip_html(item.findtext("description") or "")
+        raw_description = item.findtext("description") or ""
+        description = strip_html(raw_description)
+        image_url = extract_first_image(raw_description)
         pub_date = (item.findtext("pubDate") or "").strip()
         if link:
             items.append({
                 "title": title,
                 "link": link,
                 "description": description,
+                "image_url": image_url,
                 "pub_date": pub_date,
             })
     # RSS는 보통 최신순이므로 오래된 것부터 처리하도록 뒤집는다
@@ -137,18 +155,40 @@ def summarize_for_threads(title, description, link, groq_api_key, model):
     return text
 
 
-def post_to_threads(user_id, access_token, text):
-    # 1) 컨테이너 생성
+def _create_container(user_id, access_token, text, image_url=None):
     create_url = f"{THREADS_API_BASE}/{user_id}/threads"
-    create_payload = {
-        "media_type": "TEXT",
-        "text": text,
-        "access_token": access_token,
-    }
+    if image_url:
+        create_payload = {
+            "media_type": "IMAGE",
+            "image_url": image_url,
+            "text": text,
+            "access_token": access_token,
+        }
+    else:
+        create_payload = {
+            "media_type": "TEXT",
+            "text": text,
+            "access_token": access_token,
+        }
     create_resp = http_request(create_url, method="POST", data=create_payload)
     creation_id = create_resp.get("id")
     if not creation_id:
         raise RuntimeError(f"컨테이너 생성 실패: {create_resp}")
+    return creation_id
+
+
+def post_to_threads(user_id, access_token, text, image_url=None):
+    # 1) 컨테이너 생성 (이미지가 있으면 이미지+텍스트로 시도하고,
+    #    실패하면 텍스트만으로 재시도한다 — 네이버가 외부 이미지 요청을
+    #    막아두는 경우가 있어 그런 경우에도 게시 자체는 되도록 함)
+    try:
+        creation_id = _create_container(user_id, access_token, text, image_url=image_url)
+    except Exception as e:
+        if image_url:
+            log(f"이미지 포함 게시 실패({e}). 텍스트만으로 재시도.")
+            creation_id = _create_container(user_id, access_token, text, image_url=None)
+        else:
+            raise
 
     # 2) 처리 대기 (Meta 권장: 몇 초 정도 대기 후 publish)
     time.sleep(10)
@@ -219,7 +259,9 @@ def main():
             text = summarize_for_threads(
                 item["title"], item["description"], item["link"], groq_api_key, model
             )
-            post_id = post_to_threads(user_id, access_token, text)
+            post_id = post_to_threads(
+                user_id, access_token, text, image_url=item.get("image_url")
+            )
             log(f"게시 완료 (post id: {post_id})")
             seen.add(item["link"])
             processed += 1
